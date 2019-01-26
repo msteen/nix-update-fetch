@@ -1,0 +1,5 @@
+☐ Fix the diff highlighter for multiline additions.
+✔ Support inherit. (Do this in nix-prefetch --with-position instead.) @done (1/26/2019, 9:18:16 PM)
+☐ Support majorMinor.
+✔ Support Indent. @done (1/26/2019, 9:17:17 PM)
+☐ Support multiple indirections.

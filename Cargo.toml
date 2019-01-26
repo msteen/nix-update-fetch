@@ -1,0 +1,22 @@
+[package]
+authors = ["Matthijs Steen <emailmatthijs@gmail.com>"]
+name = "nix-update-fetch"
+edition = "2018"
+version = "0.1.0"
+
+[dependencies]
+failure = "0.1.2"
+clap = "2.32.0"
+rowan = "0.3.2"
+rnix = "0.5.1"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+itertools = "0.8.0"
+regex = "1.1.0"
+difference = "2.0"
+term = "0.5.1"
+dialoguer = "0.3.0"
+
+[[bin]]
+name = "nix-update-fetch"
+path = "src/main.rs"
