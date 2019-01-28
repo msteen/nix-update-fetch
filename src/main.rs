@@ -361,9 +361,14 @@ fn resolve_bindings<'a>(edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_e
         // Example: version
         // Search for this binding instead.
         NodeType::Token(Token::Ident) => {
-            let name = Ident::cast(rhs).unwrap().as_str();
-            let set_entry = checked_lookup_set_entry(name, set_entry.node())?;
-            resolve_bindings(edit_set_entries, EditSetEntry::new(set_entry, name, value))?;
+            let ident_name = Ident::cast(rhs).unwrap().as_str();
+            // Do not consider `null` to be a variable needing to be looked up, consider it just like a string instead.
+            if ident_name == "null" {
+                edit_set_entries.push(EditSetEntry::new(set_entry, name, value));
+            } else {
+                let set_entry = checked_lookup_set_entry(ident_name, set_entry.node())?;
+                resolve_bindings(edit_set_entries, EditSetEntry::new(set_entry, ident_name, value))?;
+            }
         },
 
         // Example: "0.1.0"
