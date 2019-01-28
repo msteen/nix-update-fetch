@@ -24,27 +24,12 @@ use std::io::Write;
 use std::process::exit;
 
 // Based on the panic! macro.
-macro_rules! err {
-    ($msg:expr) => ({
-        return Err(format_err!("{}", $msg))
-    });
-    ($msg:expr,) => ({
-        err!($msg)
-    });
-    ($fmt:expr, $($arg:tt)+) => ({
-        return Err(format_err!($fmt, $($arg)+))
-    });
-}
-
 macro_rules! issue {
     ($msg:expr) => ({
-        issue($msg)
-    });
-    ($msg:expr,) => ({
-        issue!($msg)
+        issue($msg);
     });
     ($fmt:expr, $($arg:tt)+) => ({
-        issue(format!($fmt, $($arg)+))
+        issue(format!($fmt, $($arg)+));
     });
 }
 
@@ -141,23 +126,32 @@ fn run() -> Result<(), Error> {
     let matches = App::new("nix-fetch-update")
         .version("0.1.0")
         .about("Update a fetcher call")
+        .arg(Arg::with_name("context")
+            .short("C")
+            .long("context")
+            .value_name("CONTEXT")
+            .help("How much lines of context should be shown at the diff")
+            .takes_value(true))
         .arg(Arg::with_name("version")
             .short("v")
             .long("version")
             .value_name("VERSION")
             .help("Change the version regardless of it being used in the fetcher arguments")
             .takes_value(true))
-        .arg(Arg::with_name("FETCHER_ARGS")
+        .arg(Arg::with_name("fetcher_args")
+            .value_name("FETCHER_ARGS")
             .help("The fetcher arguments to change")
             .required(true)
             .index(1))
         .get_matches();
 
+    let context = matches.value_of("context").map(str::parse).unwrap_or(Ok(2))?;
+
     let version = matches.value_of("version");
 
-    let mut fetcher_args = match serde_json::from_str::<HashMap<&str, FetcherArg>>(matches.value_of("FETCHER_ARGS").unwrap()) {
+    let mut fetcher_args = match serde_json::from_str::<HashMap<&str, FetcherArg>>(matches.value_of("fetcher_args").unwrap()) {
         Ok(fetcher_args) => fetcher_args.into_iter().collect::<Vec<_>>(),
-        Err(e) => err!("Failed to parse the JSON containing the fetcher arguments:\n  error:{}", e)
+        Err(e) => bail!("Failed to parse the JSON containing the fetcher arguments:\n  error:{}", e)
     };
     fetcher_args.sort_unstable_by(|(_, arg1), (_, arg2)| {
         let pos1 = &arg1.position;
@@ -175,7 +169,7 @@ fn run() -> Result<(), Error> {
         let mut new_content_len = content.len();
         for (name, arg) in &fetcher_args {
             if arg.value.contains('\n') {
-                err!("Multiline string values are unsupported, yet fetcher argument '{}' has one for its value:\n  value: {:?}", name, arg.value);
+                bail!("Multiline string values are unsupported, yet fetcher argument '{}' has one for its value:\n  value: {:?}", name, arg.value);
             }
             new_content_len += arg.value.len();
         }
@@ -205,9 +199,9 @@ fn run() -> Result<(), Error> {
                     if let (Some(version), Some(set_entry)) = (version, lookup_set_entry("version", &node)) {
                         if let Some(prev_file) = file_with_version {
                             if file != prev_file {
-                                err!("A version binding was already found in a previous file:\n  previous: {}\n   current: {}", prev_file, file);
+                                bail!("A version binding was already found in a previous file:\n  previous: {}\n   current: {}", prev_file, file);
                             } else if edit_set_entries.iter().any(|x| x.name == "version" && x.set_entry.node() != set_entry.node()) {
-                                err!("Different version bindings found in file '{}'.", file);
+                                bail!("Different version bindings found in file '{}'.", file);
                             }
                         } else {
                             resolve_bindings(&mut edit_set_entries, EditSetEntry::new(set_entry, "version", version))?;
@@ -229,7 +223,7 @@ fn run() -> Result<(), Error> {
 
         if !done {
             let pos = arg.position;
-            err!("Fetcher argument '{}' has not been found, while searching from position '{}:{}:{}'.", name, pos.file, pos.line, pos.column);
+            bail!("Fetcher argument '{}' has not been found, while searching from position '{}:{}:{}'.", name, pos.file, pos.line, pos.column);
         }
 
         edit_set_entries.sort_unstable_by(|x, y| {
@@ -251,7 +245,7 @@ fn run() -> Result<(), Error> {
             }
         }
 
-        if diff(&content, &new_content)? && Confirmation::new().with_text("Do you want to apply these changes?").show_default(true).interact()? {
+        if diff(context, &content, &new_content)? && Confirmation::new().with_text("Do you want to apply these changes?").show_default(true).interact()? {
             fs::write(file, new_content)?;
         }
     }
@@ -264,7 +258,7 @@ fn to_set_entry(node: &Node) -> Result<Option<&SetEntry>, Error> {
         Ok(x)
     } else if let Some(inherit) = node.parent().and_then(Inherit::cast) {
         if inherit.from().is_some() {
-            err!("There is no support yet for inherited attributes from an expression {}.", inherit.node().debug());
+            bail!("There is no support yet for inherited attributes from an expression {}.", inherit.node().debug());
         }
         if let Some(ident) = node.next_sibling().and_then(Ident::cast) {
             Ok(lookup_set_entry(ident.as_str(), ident.node()))
@@ -296,7 +290,7 @@ fn checked_lookup_set_entry<'a>(name: &str, node: &'a Node) -> Result<&'a SetEnt
     if let Some(set_entry) = lookup_set_entry(name, node) {
         Ok(set_entry)
     } else {
-        err!("Could not find binding '{}'.", name);
+        bail!("Could not find binding '{}'.", name);
     }
 }
 
@@ -336,16 +330,16 @@ fn resolve_bindings<'a>(edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_e
                                     if lambda.kind() == NodeType::Token(Token::Ident) && lambda.to_string() == "majorMinor" {
                                         regex_format.push_str(r#"[0-9]+\.[0-9]+"#);
                                     } else {
-                                        err!("Unsupported lambda application {}.", lambda.debug())
+                                        bail!("Unsupported lambda application {}.", lambda.debug())
                                     }
                                 },
-                                _ => err!("Unsupported interpolated token {}.", child.debug())
+                                _ => bail!("Unsupported interpolated token {}.", child.debug())
                             }
                         },
                         _ => issue!("Expected interpolation literal or AST, yet found node {}.", node.debug())
                     }
                 } else {
-                    err!("Expected node containing a single child node, yet found node {}.", node.debug());
+                    bail!("Expected node containing a single child node, yet found node {}.", node.debug());
                 }
             }
             if let Ok(re) = Regex::new(&regex_format) {
@@ -357,7 +351,7 @@ fn resolve_bindings<'a>(edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_e
                         resolve_bindings(edit_set_entries, EditSetEntry::new(set_entry, name, value))?;
                     }
                 } else {
-                    err!("The constructed regular expression failed to match:\n  regex: {}\n  value: {}.", regex_format, test_value);
+                    bail!("The constructed regular expression failed to match:\n  regex: {}\n  value: {}.", regex_format, test_value);
                 }
             } else {
                 issue!("Failed to construct regular expression '{}'.", regex_format);
@@ -378,13 +372,13 @@ fn resolve_bindings<'a>(edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_e
             edit_set_entries.push(EditSetEntry::new(set_entry, name, value));
         },
 
-        _ => err!("Unsupported value node {}.", rhs.debug())
+        _ => bail!("Unsupported value node {}.", rhs.debug())
     }
 
     Ok(())
 }
 
-fn diff(text1: &str, text2: &str) -> Result<bool, Error> {
+fn diff(context: usize, text1: &str, text2: &str) -> Result<bool, Error> {
     let Changeset { diffs, .. } = Changeset::new(text1, text2, "\n");
 
     let mut t = term::stdout().unwrap();
@@ -396,12 +390,12 @@ fn diff(text1: &str, text2: &str) -> Result<bool, Error> {
                 t.reset().unwrap();
                 let mut lines = x.lines();
                 if i != 0 {
-                    for x in lines.by_ref().take(2) {
+                    for x in lines.by_ref().take(context) {
                         writeln!(t, " {}", x)?;
                     }
                 }
                 if i != last_i {
-                    for x in lines.rev().take(2).collect::<Vec<&str>>().into_iter().rev() {
+                    for x in lines.rev().take(context).collect::<Vec<&str>>().into_iter().rev() {
                         writeln!(t, " {}", x)?;
                     }
                 }
