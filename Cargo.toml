@@ -20,3 +20,6 @@ dialoguer = "0.3.0"
 [[bin]]
 name = "nix-update-fetch"
 path = "src/main.rs"
+
+[profile.release]
+lto = true
