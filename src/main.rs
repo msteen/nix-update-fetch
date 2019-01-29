@@ -18,7 +18,7 @@ use rowan::WalkEvent;
 use serde_json;
 use serde_json::json;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::process::exit;
@@ -58,17 +58,17 @@ struct EditSetEntry<'a> {
     set_entry: &'a SetEntry,
     name: String,
     value: String,
-    underived: bool,
+    derived: bool,
 }
 
 impl<'a> EditSetEntry<'a> {
     // Automatically convert `&str` to `String`.
-    fn new<S: Into<String>, T: Into<String>>(set_entry: &'a SetEntry, name: S, value: T, underived: bool) -> EditSetEntry<'a> {
+    fn new<S: Into<String>, T: Into<String>>(set_entry: &'a SetEntry, name: S, value: T, derived: bool) -> EditSetEntry<'a> {
         EditSetEntry {
             set_entry,
             name: name.into(),
             value: value.into(),
-            underived,
+            derived,
         }
     }
 }
@@ -165,8 +165,6 @@ fn run() -> Result<(), Error> {
         (pos1.file, pos1.line).cmp(&(pos2.file, pos2.line))
     });
 
-    let mut underived_bindings = HashSet::new();
-
     let mut file_with_version: Option<&str> = None;
 
     let groups = fetcher_args.into_iter().group_by(|(_, arg)| arg.position.file);
@@ -202,7 +200,7 @@ fn run() -> Result<(), Error> {
                     continue;
                 }
                 if let Some(set_entry) = to_set_entry(&node)? {
-                    resolve_bindings(&mut underived_bindings, &mut edit_set_entries, EditSetEntry::new(set_entry, name, arg.value, true))?;
+                    resolve_bindings(&mut edit_set_entries, EditSetEntry::new(set_entry, name, arg.value, false))?;
 
                     if let (Some(version), Some(set_entry)) = (version, lookup_set_entry("version", &node)) {
                         if let Some(prev_file) = file_with_version {
@@ -212,7 +210,7 @@ fn run() -> Result<(), Error> {
                                 bail!("Different version bindings found in file '{}'.", file);
                             }
                         } else {
-                            resolve_bindings(&mut underived_bindings, &mut edit_set_entries, EditSetEntry::new(set_entry, "version", version, true))?;
+                            resolve_bindings(&mut edit_set_entries, EditSetEntry::new(set_entry, "version", version, false))?;
                             file_with_version = Some(file);
                         }
                     }
@@ -234,9 +232,11 @@ fn run() -> Result<(), Error> {
             bail!("Fetcher argument '{}' has not been found, while searching from position '{}:{}:{}'.", name, pos.file, pos.line, pos.column);
         }
 
-        edit_set_entries.sort_unstable_by(|x, y| {
+        // We want to use the reverse insertion order (last binding wins), so we need to reverse the vector first.
+        edit_set_entries.reverse();
+        edit_set_entries.sort_by(|x, y| {
             let f = |x: &EditSetEntry| x.set_entry.node().range().start().to_usize();
-            (f(x), !x.underived).cmp(&(f(y), !y.underived)) // bool orders from false to true, while we want to reverse
+            (f(x), x.derived).cmp(&(f(y), y.derived))
         });
 
         let mut min_end = 0;
@@ -302,8 +302,8 @@ fn checked_lookup_set_entry<'a>(name: &str, node: &'a Node) -> Result<&'a SetEnt
     }
 }
 
-fn resolve_bindings<'a>(underived_bindings: &mut HashSet<String>, edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_entry: EditSetEntry<'a>) -> Result<(), Error> {
-    let EditSetEntry { set_entry, name, value, underived } = edit_set_entry;
+fn resolve_bindings<'a>(edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_entry: EditSetEntry<'a>) -> Result<(), Error> {
+    let EditSetEntry { set_entry, name, value, derived } = edit_set_entry;
 
     let rhs = set_entry.value();
     match rhs.kind() {
@@ -356,7 +356,7 @@ fn resolve_bindings<'a>(underived_bindings: &mut HashSet<String>, edit_set_entri
                     for name in names.into_iter() {
                         let set_entry = checked_lookup_set_entry(&name, set_entry.node())?;
                         let value = captures.name(&name).unwrap().as_str();
-                        resolve_bindings(underived_bindings, edit_set_entries, EditSetEntry::new(set_entry, name, value, false))?;
+                        resolve_bindings(edit_set_entries, EditSetEntry::new(set_entry, name, value, true))?;
                     }
                 } else {
                     bail!("The constructed regular expression failed to match:\n  regex: {}\n  value: {}.", regex_format, test_value);
@@ -372,32 +372,23 @@ fn resolve_bindings<'a>(underived_bindings: &mut HashSet<String>, edit_set_entri
             let ident_name = Ident::cast(rhs).unwrap().as_str();
             // Do not consider `null` to be a variable needing to be looked up, consider it just like a string instead.
             if ident_name == "null" {
-                add_edit_set_entry(underived_bindings, edit_set_entries, EditSetEntry::new(set_entry, name, value, underived));
+                edit_set_entries.push(EditSetEntry::new(set_entry, name, value, derived));
             } else {
                 let set_entry = checked_lookup_set_entry(ident_name, set_entry.node())?;
-                resolve_bindings(underived_bindings, edit_set_entries, EditSetEntry::new(set_entry, ident_name, value, false))?;
+                resolve_bindings(edit_set_entries, EditSetEntry::new(set_entry, ident_name, value, true))?;
             }
         },
 
         // Example: "0.1.0"
         // What we are looking for, a simple string binding.
         NodeType::Token(Token::String) => {
-            add_edit_set_entry(underived_bindings, edit_set_entries, EditSetEntry::new(set_entry, name, value, underived));
+            edit_set_entries.push(EditSetEntry::new(set_entry, name, value, derived));
         },
 
         _ => bail!("Unsupported value node {}.", rhs.debug())
     }
 
     Ok(())
-}
-
-fn add_edit_set_entry<'a>(underived_bindings: &mut HashSet<String>, edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_entry: EditSetEntry<'a>) {
-    if !underived_bindings.contains(&edit_set_entry.name) {
-        if edit_set_entry.underived {
-            underived_bindings.insert(edit_set_entry.name.to_owned());
-        }
-        edit_set_entries.push(edit_set_entry);
-    }
 }
 
 fn diff(context: usize, text1: &str, text2: &str) -> Result<bool, Error> {

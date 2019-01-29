@@ -6,6 +6,15 @@ Update a call made to a Nix fetcher, i.e. a package source.
 Works together with:
 https://github.com/msteen/nix-prefetch
 
+Installation
+---
+
+```
+git clone https://github.com/msteen/nix-update-fetch.git
+cd nix-update-fetch
+nix-env --install --file release.nix
+```
+
 Features
 ---
 
