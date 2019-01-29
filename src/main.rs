@@ -18,7 +18,7 @@ use rowan::WalkEvent;
 use serde_json;
 use serde_json::json;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::process::exit;
@@ -58,15 +58,17 @@ struct EditSetEntry<'a> {
     set_entry: &'a SetEntry,
     name: String,
     value: String,
+    underived: bool,
 }
 
 impl<'a> EditSetEntry<'a> {
     // Automatically convert `&str` to `String`.
-    fn new<S: Into<String>, T: Into<String>>(set_entry: &'a SetEntry, name: S, value: T) -> EditSetEntry<'a> {
+    fn new<S: Into<String>, T: Into<String>>(set_entry: &'a SetEntry, name: S, value: T, underived: bool) -> EditSetEntry<'a> {
         EditSetEntry {
             set_entry,
             name: name.into(),
             value: value.into(),
+            underived,
         }
     }
 }
@@ -130,14 +132,16 @@ fn run() -> Result<(), Error> {
             .short("C")
             .long("context")
             .value_name("CONTEXT")
-            .help("How much lines of context should be shown at the diff")
-            .takes_value(true))
+            .help("How much lines of context should be shown at the diff"))
+        .arg(Arg::with_name("assume_yes")
+            .short("y")
+            .long("yes")
+            .help("Assume that, yes, you want the changes applied"))
         .arg(Arg::with_name("version")
             .short("v")
             .long("version")
             .value_name("VERSION")
-            .help("Change the version regardless of it being used in the fetcher arguments")
-            .takes_value(true))
+            .help("Change the version regardless of it being used in the fetcher arguments"))
         .arg(Arg::with_name("fetcher_args")
             .value_name("FETCHER_ARGS")
             .help("The fetcher arguments to change")
@@ -146,6 +150,8 @@ fn run() -> Result<(), Error> {
         .get_matches();
 
     let context = matches.value_of("context").map(str::parse).unwrap_or(Ok(2))?;
+
+    let assume_yes = matches.occurrences_of("assume_yes") > 0;
 
     let version = matches.value_of("version");
 
@@ -159,10 +165,12 @@ fn run() -> Result<(), Error> {
         (pos1.file, pos1.line).cmp(&(pos2.file, pos2.line))
     });
 
+    let mut underived_bindings = HashSet::new();
+
     let mut file_with_version: Option<&str> = None;
 
     let groups = fetcher_args.into_iter().group_by(|(_, arg)| arg.position.file);
-    for (file, group) in groups.into_iter() {
+    for (file, group) in &groups {
         let fetcher_args = group.collect::<Vec<_>>();
 
         let content = fs::read_to_string(&file)?;
@@ -194,7 +202,7 @@ fn run() -> Result<(), Error> {
                     continue;
                 }
                 if let Some(set_entry) = to_set_entry(&node)? {
-                    resolve_bindings(&mut edit_set_entries, EditSetEntry::new(set_entry, name, arg.value))?;
+                    resolve_bindings(&mut underived_bindings, &mut edit_set_entries, EditSetEntry::new(set_entry, name, arg.value, true))?;
 
                     if let (Some(version), Some(set_entry)) = (version, lookup_set_entry("version", &node)) {
                         if let Some(prev_file) = file_with_version {
@@ -204,7 +212,7 @@ fn run() -> Result<(), Error> {
                                 bail!("Different version bindings found in file '{}'.", file);
                             }
                         } else {
-                            resolve_bindings(&mut edit_set_entries, EditSetEntry::new(set_entry, "version", version))?;
+                            resolve_bindings(&mut underived_bindings, &mut edit_set_entries, EditSetEntry::new(set_entry, "version", version, true))?;
                             file_with_version = Some(file);
                         }
                     }
@@ -228,7 +236,7 @@ fn run() -> Result<(), Error> {
 
         edit_set_entries.sort_unstable_by(|x, y| {
             let f = |x: &EditSetEntry| x.set_entry.node().range().start().to_usize();
-            f(x).cmp(&f(y))
+            (f(x), !x.underived).cmp(&(f(y), !y.underived)) // bool orders from false to true, while we want to reverse
         });
 
         let mut min_end = 0;
@@ -245,7 +253,7 @@ fn run() -> Result<(), Error> {
             }
         }
 
-        if diff(context, &content, &new_content)? && Confirmation::new().with_text("Do you want to apply these changes?").show_default(true).interact()? {
+        if diff(context, &content, &new_content)? && (assume_yes || Confirmation::new().with_text("Do you want to apply these changes?").show_default(true).interact()?) {
             fs::write(file, new_content)?;
         }
     }
@@ -294,8 +302,8 @@ fn checked_lookup_set_entry<'a>(name: &str, node: &'a Node) -> Result<&'a SetEnt
     }
 }
 
-fn resolve_bindings<'a>(edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_entry: EditSetEntry<'a>) -> Result<(), Error> {
-    let EditSetEntry { set_entry, name, value } = edit_set_entry;
+fn resolve_bindings<'a>(underived_bindings: &mut HashSet<String>, edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_entry: EditSetEntry<'a>) -> Result<(), Error> {
+    let EditSetEntry { set_entry, name, value, underived } = edit_set_entry;
 
     let rhs = set_entry.value();
     match rhs.kind() {
@@ -348,7 +356,7 @@ fn resolve_bindings<'a>(edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_e
                     for name in names.into_iter() {
                         let set_entry = checked_lookup_set_entry(&name, set_entry.node())?;
                         let value = captures.name(&name).unwrap().as_str();
-                        resolve_bindings(edit_set_entries, EditSetEntry::new(set_entry, name, value))?;
+                        resolve_bindings(underived_bindings, edit_set_entries, EditSetEntry::new(set_entry, name, value, false))?;
                     }
                 } else {
                     bail!("The constructed regular expression failed to match:\n  regex: {}\n  value: {}.", regex_format, test_value);
@@ -364,23 +372,32 @@ fn resolve_bindings<'a>(edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_e
             let ident_name = Ident::cast(rhs).unwrap().as_str();
             // Do not consider `null` to be a variable needing to be looked up, consider it just like a string instead.
             if ident_name == "null" {
-                edit_set_entries.push(EditSetEntry::new(set_entry, name, value));
+                add_edit_set_entry(underived_bindings, edit_set_entries, EditSetEntry::new(set_entry, name, value, underived));
             } else {
                 let set_entry = checked_lookup_set_entry(ident_name, set_entry.node())?;
-                resolve_bindings(edit_set_entries, EditSetEntry::new(set_entry, ident_name, value))?;
+                resolve_bindings(underived_bindings, edit_set_entries, EditSetEntry::new(set_entry, ident_name, value, false))?;
             }
         },
 
         // Example: "0.1.0"
         // What we are looking for, a simple string binding.
         NodeType::Token(Token::String) => {
-            edit_set_entries.push(EditSetEntry::new(set_entry, name, value));
+            add_edit_set_entry(underived_bindings, edit_set_entries, EditSetEntry::new(set_entry, name, value, underived));
         },
 
         _ => bail!("Unsupported value node {}.", rhs.debug())
     }
 
     Ok(())
+}
+
+fn add_edit_set_entry<'a>(underived_bindings: &mut HashSet<String>, edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_entry: EditSetEntry<'a>) {
+    if !underived_bindings.contains(&edit_set_entry.name) {
+        if edit_set_entry.underived {
+            underived_bindings.insert(edit_set_entry.name.to_owned());
+        }
+        edit_set_entries.push(edit_set_entry);
+    }
 }
 
 fn diff(context: usize, text1: &str, text2: &str) -> Result<bool, Error> {
