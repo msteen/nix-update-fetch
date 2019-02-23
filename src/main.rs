@@ -1,5 +1,4 @@
-#[macro_use]
-extern crate failure;
+#[macro_use] extern crate failure;
 extern crate term;
 extern crate difference;
 extern crate clap;
@@ -23,7 +22,6 @@ use std::fs;
 use std::io::Write;
 use std::process::exit;
 
-// Based on the panic! macro.
 macro_rules! issue {
     ($msg:expr) => ({
         issue($msg);
@@ -33,7 +31,6 @@ macro_rules! issue {
     });
 }
 
-// The type is necessary to satisfy the compiler, even though we exit.
 fn issue(msg: String) -> ! {
     eprintln!("Something unexpected happened:");
     eprintln!("error: {}", msg);
@@ -42,14 +39,14 @@ fn issue(msg: String) -> ! {
 }
 
 #[derive(Debug, Deserialize)]
-struct FetcherArg<'a> {
-    position: Pos<'a>,
-    value: &'a str,
+struct FetcherArg {
+    position: Pos,
+    value: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct Pos<'a> {
-    file: &'a str,
+struct Pos {
+    file: String,
     line: usize,
     column: usize,
 }
@@ -137,38 +134,44 @@ fn run() -> Result<(), Error> {
             .short("y")
             .long("yes")
             .help("Assume that, yes, you want the changes applied"))
-        .arg(Arg::with_name("version")
-            .short("v")
-            .long("version")
-            .value_name("VERSION")
-            .help("Change the version regardless of it being used in the fetcher arguments"))
         .arg(Arg::with_name("fetcher_args")
             .value_name("FETCHER_ARGS")
             .help("The fetcher arguments to change")
             .required(true)
             .index(1))
+        .arg(Arg::with_name("bindings")
+            .value_name("BINDINGS")
+            .help("The bindings to change")
+            .required(false)
+            .index(2))
         .get_matches();
 
-    let context = matches.value_of("context").map(str::parse).unwrap_or(Ok(2))?;
+    let context = matches.value_of("context").map(str::parse).unwrap_or(Ok(3))?;
 
     let assume_yes = matches.occurrences_of("assume_yes") > 0;
 
-    let version = matches.value_of("version");
-
     let mut fetcher_args = match serde_json::from_str::<HashMap<&str, FetcherArg>>(matches.value_of("fetcher_args").unwrap()) {
         Ok(fetcher_args) => fetcher_args.into_iter().collect::<Vec<_>>(),
-        Err(e) => bail!("Failed to parse the JSON containing the fetcher arguments:\n  error:{}", e)
+        Err(e) => bail!("Failed to parse the JSON containing the fetcher arguments:\n  {}", e)
     };
     fetcher_args.sort_unstable_by(|(_, arg1), (_, arg2)| {
         let pos1 = &arg1.position;
         let pos2 = &arg2.position;
-        (pos1.file, pos1.line).cmp(&(pos2.file, pos2.line))
+        (&pos1.file, pos1.line).cmp(&(&pos2.file, pos2.line))
     });
 
-    let mut file_with_version: Option<&str> = None;
+    let bindings = if let Some(json) = matches.value_of("bindings") {
+        match serde_json::from_str::<HashMap<&str, String>>(json) {
+            Ok(bindings) => bindings.into_iter().collect::<Vec<_>>(),
+            Err(e) => bail!("Failed to parse the JSON containing the bindings:\n  {}", e)
+        }
+    } else {
+        Vec::new()
+    };
 
-    let groups = fetcher_args.into_iter().group_by(|(_, arg)| arg.position.file);
-    for (file, group) in &groups {
+    let mut binding_files: HashMap<&str, String> = HashMap::new();
+
+    for (file, group) in fetcher_args.into_iter().group_by(|(_, arg)| arg.position.file.clone()).into_iter() {
         let fetcher_args = group.collect::<Vec<_>>();
 
         let content = fs::read_to_string(&file)?;
@@ -202,16 +205,19 @@ fn run() -> Result<(), Error> {
                 if let Some(set_entry) = to_set_entry(&node)? {
                     resolve_bindings(&mut edit_set_entries, EditSetEntry::new(set_entry, name, arg.value, false))?;
 
-                    if let (Some(version), Some(set_entry)) = (version, lookup_set_entry("version", &node)) {
-                        if let Some(prev_file) = file_with_version {
-                            if file != prev_file {
-                                bail!("A version binding was already found in a previous file:\n  previous: {}\n   current: {}", prev_file, file);
-                            } else if edit_set_entries.iter().any(|x| x.name == "version" && x.set_entry.node() != set_entry.node()) {
-                                bail!("Different version bindings found in file '{}'.", file);
+                    for (name, value) in &bindings {
+                        let name = *name;
+                        if let Some(set_entry) = lookup_set_entry(name, &node) {
+                            if let Some(prev_file) = binding_files.get(name) {
+                                if file != *prev_file {
+                                    bail!("A {} binding was already found in a previous file:\n  previous: {}\n   current: {}", name, prev_file, file);
+                                } else if edit_set_entries.iter().any(|x| x.name == name && x.set_entry.node() != set_entry.node()) {
+                                    bail!("Different {} bindings found in file '{}'.", name, file);
+                                }
+                            } else {
+                                resolve_bindings(&mut edit_set_entries, EditSetEntry::new(set_entry, name, value.clone(), false))?;
+                                binding_files.insert(name, file.clone());
                             }
-                        } else {
-                            resolve_bindings(&mut edit_set_entries, EditSetEntry::new(set_entry, "version", version, false))?;
-                            file_with_version = Some(file);
                         }
                     }
 
@@ -245,7 +251,7 @@ fn run() -> Result<(), Error> {
                 let end = node.range().end().to_usize();
                 if let Some(EditSetEntry { name, value, .. }) = edit_set_entries.iter().find(|x| x.set_entry.node() == node) {
                     // TODO: Test if we should only replace the value instead.
-                    new_content.push_str(&format!("{} = {};", name, escape_nix_string(&value)));
+                    new_content.push_str(&format!("{} = {};", name, value));
                     min_end = end;
                 } else if end > min_end {
                     new_content.push_str(node.as_str());
@@ -279,6 +285,11 @@ fn to_set_entry(node: &Node) -> Result<Option<&SetEntry>, Error> {
 }
 
 fn lookup_set_entry<'a>(name: &str, mut node: &'a Node) -> Option<&'a SetEntry> {
+    if !node.parent().and_then(Set::cast).filter(|set| !set.recursive()).is_some() {
+        while let Some(new_node) = node.next_sibling() {
+            node = new_node;
+        }
+    }
     loop {
         if let Some(new_node) = node.prev_sibling() {
             node = new_node;
@@ -351,15 +362,14 @@ fn resolve_bindings<'a>(edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_e
                 }
             }
             if let Ok(re) = Regex::new(&regex_format) {
-                let test_value = escape_nix_string(&value);
-                if let Some(captures) = re.captures(&test_value) {
+                if let Some(captures) = re.captures(&value) {
                     for name in names.into_iter() {
                         let set_entry = checked_lookup_set_entry(&name, set_entry.node())?;
-                        let value = captures.name(&name).unwrap().as_str();
+                        let value = escape_nix_string(captures.name(&name).unwrap().as_str());
                         resolve_bindings(edit_set_entries, EditSetEntry::new(set_entry, name, value, true))?;
                     }
                 } else {
-                    bail!("The constructed regular expression failed to match:\n  regex: {}\n  value: {}.", regex_format, test_value);
+                    edit_set_entries.push(EditSetEntry::new(set_entry, name, value, derived));
                 }
             } else {
                 issue!("Failed to construct regular expression '{}'.", regex_format);
@@ -370,8 +380,8 @@ fn resolve_bindings<'a>(edit_set_entries: &mut Vec<EditSetEntry<'a>>, edit_set_e
         // Search for this binding instead.
         NodeType::Token(Token::Ident) => {
             let ident_name = Ident::cast(rhs).unwrap().as_str();
-            // Do not consider `null` to be a variable needing to be looked up, consider it just like a string instead.
-            if ident_name == "null" {
+            // Do not consider keyword values to be a variable needing to be looked up, consider it just like a string instead.
+            if ["null", "false", "true"].iter().any(|x| x == &ident_name) {
                 edit_set_entries.push(EditSetEntry::new(set_entry, name, value, derived));
             } else {
                 let set_entry = checked_lookup_set_entry(ident_name, set_entry.node())?;

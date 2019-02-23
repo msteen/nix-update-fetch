@@ -5,7 +5,7 @@ rustPlatform.buildRustPackage rec {
   pname = "nix-update-fetch";
   version = "0.1.0";
 
-  src = ./.;
+  src = builtins.fetchGit { url = ./.; };
 
   RUSTC_BOOTSTRAP = 1;
 
