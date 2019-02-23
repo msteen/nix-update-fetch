@@ -1,11 +1,18 @@
-{ lib, rustPlatform, pkgconfig, ncurses }:
+{ lib, callPackage, fetchFromGitHub, rustPlatform, pkgconfig, ncurses }:
+
+with callPackage (fetchFromGitHub {
+  owner = "siers";
+  repo = "nix-gitignore";
+  rev = "cc962a73113dbb32407d5099c4bf6f7ecf5612c9";
+  sha256 = "08mgdnb54rhsz4024hx008dzg01c7kh3r45g068i7x91akjia2cq";
+}) { };
 
 rustPlatform.buildRustPackage rec {
   name = "${pname}-${version}";
   pname = "nix-update-fetch";
   version = "0.1.0";
 
-  src = builtins.fetchGit { url = ./.; };
+  src = gitignoreSource [ ".git" ] ./.;
 
   RUSTC_BOOTSTRAP = 1;
 
