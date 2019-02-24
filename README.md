@@ -1,7 +1,7 @@
 `nix-update-fetch`
 ===
 
-Update a call made to a fetcher function call (e.g. package sources) and surrounding bindings (e.g. `version = "0.1.0";`).
+Update a call made to a fetcher function call (e.g. package sources) and its surrounding bindings (e.g. `version = "0.1.0";`).
 
 Not meant to be used directly, instead the wrapper script [`nix-upfetch`](https://github.com/msteen/nix-upfetch) that uses both `nix-update-fetch` and [`nix-prefetch`](https://github.com/msteen/nix-prefetch) should be used.
 
